@@ -2,8 +2,10 @@
   "canisters": {
     "nft-Marketplace-backend": {
       "candid": "src/nft-Marketplace-backend/nft-Marketplace-backend.did",
+      "main": "src/nft-Marketplace-backend/src/lib.rs",
       "package": "nft-Marketplace-backend",
-      "type": "rust"
+      "type": "rust",
+      "init": "(record { owner = opt principal \"565ec-3m77y-baush-ctl56-fov37-67wgb-ikzsx-h5xdb-7qo74-njlng-kae\"; name = \"MyNFT\"; symbol = \"MNFT\" })"
     },
     "nft-Marketplace-frontend": {
       "dependencies": [
@@ -22,6 +24,11 @@
       "packtool": ""
     }
   },
+  "metadata": [
+   {
+     "name": "candid:service"
+   }
+],
   "output_env_file": ".env",
   "version": 1
 }
