@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_else_if)]
 #![allow(non_snake_case)]
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::string::String;
@@ -8,13 +9,13 @@ use std::string::String;
 use candid::{CandidType, Nat, Principal};
 use ic_cdk::api;
 use ic_cdk::api::caller;
-use ic_cdk::api::call;
-use std::borrow::Cow;
 use ic_cdk::{init, query, update};
 use serde::{Deserialize, Serialize};
 
+mod http; 
+
 type TokenId = Nat;
-type AccountIdentifier = String; // Represented as a String for simplicity
+type AccountIdentifier = String; 
 type Subaccount = [u8; 32];
 
 // Define a type for errors
@@ -32,15 +33,15 @@ pub enum Error {
     NotListedForSale,
     AlreadyListedForSale,
     CannotBuyOwnNFT,
-    InsufficientFunds, // Placeholder for payment handling
+    InsufficientFunds, 
     Other(String),
 }
 
 // Define a result type for canister operations
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-// Define the structure for NFT metadata (you can customize this)
-#[derive(CandidType, serde::Deserialize, Serialize, Clone)]
+// Define the structure for NFT metadata
+#[derive(CandidType, Deserialize, Serialize, Clone)]
 pub struct Metadata {
     pub name: String,
     pub description: String,
@@ -55,6 +56,27 @@ pub struct Listing {
     pub price: Nat, // Price in some unit (e.g., ICP tokens)
 }
 
+// Define the purpose of metadata parts for HTTP serving 
+#[derive(CandidType, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub enum MetadataPurpose {
+    Preview,
+    Rendered,
+    Other(String),
+}
+
+// Define the value type for metadata 
+#[derive(CandidType, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub enum MetadataVal {
+    TextContent(String),
+    BlobContent(Vec<u8>),
+}
+
+// Define the structure for an NFT as used by the HTTP serving logic 
+#[derive(CandidType, Deserialize, Serialize, Clone)]
+pub struct NFT {
+    pub metadata: Vec<http::MetadataPart>, 
+}
+
 // Define the state of the canister
 #[derive(CandidType, Deserialize, Serialize)]
 pub struct State {
@@ -65,7 +87,7 @@ pub struct State {
     pub tokens: HashMap<TokenId, Principal>, // Token ID to owner
     pub token_approvals: HashMap<TokenId, Principal>, // Token ID to approved principal
     pub operator_approvals: HashMap<Principal, HashSet<Principal>>, // Owner to set of approved operators
-    pub token_metadata: HashMap<TokenId, Metadata>, // Token ID to metadata
+    pub nfts: HashMap<usize, http::NFT>, // Token ID to NFT data for HTTP serving
     pub next_token_id: Nat,
     pub listings: HashMap<TokenId, Listing>, // Token ID to Listing information
 }
@@ -80,7 +102,7 @@ impl Default for State {
             tokens: HashMap::new(),
             token_approvals: HashMap::new(),
             operator_approvals: HashMap::new(),
-            token_metadata: HashMap::new(),
+            nfts: HashMap::new(), // Initialize nfts
             next_token_id: Nat::from(1u32),
             listings: HashMap::new(),
         }
@@ -107,7 +129,7 @@ fn init(args: InitArgs) {
             .owner
             .unwrap_or_else(api::caller));
         state.name = name();
-        state.symbol = symbol();  
+        state.symbol = symbol();
     });
 }
 
@@ -247,23 +269,24 @@ fn mint(to: Principal, metadata: Metadata) -> Result<TokenId> {
         let mut state = s.borrow_mut();
         let token_id = state.next_token_id.clone();
         state.tokens.insert(token_id.clone(), to);
-        state.token_metadata.insert(token_id.clone(), metadata);
+        let metadata_part = http::MetadataPart {
+            purpose: http::MetadataPurpose::Rendered,
+            data: metadata.media_url.clone().into_bytes(),
+            key_val_data: HashMap::from_iter([("contentType".to_string(), http::MetadataVal::TextContent("text/plain".to_string()))]),
+        };
+        state.nfts.insert(token_id.0 as usize, http::NFT { metadata: vec![metadata_part] });
         state.total_supply = state.total_supply.clone() + Nat::from(1u32);
         state.next_token_id = state.next_token_id.clone() + Nat::from(1u32);
+        http::add_hash(token_id.0);
         Ok(token_id)
     })
 }
 
-// Placeholder for tokenURI - you'll need to implement the logic to return the actual URI
+// Placeholder for tokenURI 
 #[query(name = "tokenURIDip721")]
 fn tokenURI(token_id: TokenId) -> Result<String> {
-    STATE.with(|s| {
-        s.borrow()
-            .token_metadata
-            .get(&token_id)
-            .map(|meta| meta.media_url.clone()) // Or construct the URI based on metadata
-            .ok_or(Error::MetadataNotFound)
-    })
+    //return the direct HTTP URL for the metadata
+    Ok(format!("https://{}.raw.ic0.app/{}", api::id(), token_id))
 }
 
 // -------------------- SELLING LOGIC --------------------
@@ -330,12 +353,6 @@ fn buyItem(token_id: TokenId) -> Result<()> {
             return Err(Error::CannotBuyOwnNFT);
         }
 
-        // -------------------- PAYMENT HANDLING (SKIPPED FOR THIS SIMULATION) --------------------
-        // In a real-world scenario, you would:
-        // 1. Check if the buyer has sufficient funds.
-        // 2. Transfer the price amount from the buyer to the seller.
-        // -----------------------------------------------------------------------------------------
-
         // Transfer ownership from the seller to the buyer
         transferFromInternal(&mut state, seller, buyer, token_id_clone)?;
 
@@ -373,7 +390,7 @@ fn transferFromInternal(
 fn setName(new_name: String) -> Result<()> {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
-        if caller() == state.owner.expect("REASON"){
+        if state.owner.expect("REASON") == caller() {
             state.name = new_name;
             Ok(())
         } else {
@@ -387,7 +404,7 @@ fn setName(new_name: String) -> Result<()> {
 fn setSymbol(new_symbol: String) -> Result<()> {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
-        if caller() == state.owner.expect("REASON") {
+        if state.owner.expect("REASON") == caller() {
             state.symbol = new_symbol;
             Ok(())
         } else {
